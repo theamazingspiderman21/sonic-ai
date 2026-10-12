@@ -5,41 +5,53 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
     private var recognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
-    private val handler = Handler(Looper.getMainLooper())
+    private var ttsReady = false
 
+    private var status by mutableStateOf("Sonic is ready")
+    private var heardText by mutableStateOf("Tap the orb to speak")
     private var listening by mutableStateOf(false)
-    private var status by mutableStateOf("Sonic is ready.")
-    private var heardText by mutableStateOf("Tap the microphone to begin.")
-    private var resumeAfterSpeech = false
 
     private val permissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
-            if (granted) startListening()
-            else status = "Microphone permission is required."
+            if (granted) {
+                startListening()
+            } else {
+                status = "Microphone permission required"
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -47,181 +59,278 @@ class MainActivity : ComponentActivity() {
 
         tts = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
+                ttsReady = true
                 tts?.language = Locale.getDefault()
             }
         }
 
         if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            recognizer =
+                SpeechRecognizer.createSpeechRecognizer(this)
 
-            recognizer?.setRecognitionListener(object :
-                RecognitionListener {
+            recognizer?.setRecognitionListener(
+                object : RecognitionListener {
 
-                override fun onReadyForSpeech(params: Bundle?) {
-                    listening = true
-                    status = "Listening..."
-                }
-
-                override fun onBeginningOfSpeech() {
-                    status = "I hear you..."
-                }
-
-                override fun onEndOfSpeech() {
-                    status = "Processing your voice..."
-                }
-
-                override fun onResults(results: Bundle?) {
-                    listening = false
-
-                    val matches = results?.getStringArrayList(
-                        SpeechRecognizer.RESULTS_RECOGNITION
-                    )
-
-                    val spoken = matches?.firstOrNull().orEmpty()
-
-                    if (spoken.isBlank()) {
-                        status = "Didn't catch that. Try again."
-                        return
+                    override fun onReadyForSpeech(params: Bundle?) {
+                        listening = true
+                        status = "Listening to you..."
                     }
 
-                    heardText = spoken
-                    val phrase = spoken.lowercase(Locale.ROOT)
-
-                    if (phrase.contains("hey sonic")) {
-                        status = "Sonic activated!"
-                        speak(
-                            "Yes, I'm listening. What do you need?",
-                            true
-                        )
-                    } else {
-                        status = "I heard you."
-                        speak("You said: $spoken", true)
+                    override fun onBeginningOfSpeech() {
+                        status = "I'm hearing you..."
                     }
-                }
 
-                override fun onError(error: Int) {
-                    listening = false
-                    status = when (error) {
-                        SpeechRecognizer.ERROR_NO_MATCH ->
-                            "Didn't catch that. Tap to try again."
-                        SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                            "No speech detected. Tap to try again."
-                        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                            "Microphone permission is missing."
-                        else -> "Recognition stopped. Tap to retry."
+                    override fun onEndOfSpeech() {
+                        status = "Thinking..."
                     }
-                }
 
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onPartialResults(
-                    partialResults: Bundle?
-                ) {}
-                override fun onEvent(
-                    eventType: Int,
-                    params: Bundle?
-                ) {}
-            })
-        } else {
-            status = "Speech recognition isn't available."
-        }
+                    override fun onResults(results: Bundle?) {
+                        listening = false
 
-        tts?.setOnUtteranceProgressListener(
-            object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
+                        val spoken = results
+                            ?.getStringArrayList(
+                                SpeechRecognizer.RESULTS_RECOGNITION
+                            )
+                            ?.firstOrNull()
+                            .orEmpty()
 
-                override fun onDone(utteranceId: String?) {
-                    handler.post {
-                        if (resumeAfterSpeech) {
-                            resumeAfterSpeech = false
-                            startListening()
+                        if (spoken.isBlank()) {
+                            status = "I didn't catch that. Try again."
+                            return
+                        }
+
+                        heardText = spoken
+
+                        val response =
+                            if (spoken.lowercase(Locale.ROOT)
+                                    .contains("hey sonic")) {
+                                "Yes, I'm here. How can I help?"
+                            } else {
+                                "You said: $spoken"
+                            }
+
+                        speak(response)
+                    }
+
+                    override fun onError(error: Int) {
+                        listening = false
+                        status = when (error) {
+                            SpeechRecognizer.ERROR_NO_MATCH ->
+                                "Didn't catch that. Tap the orb again."
+                            SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
+                                "I didn't hear anything."
+                            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
+                                "Microphone permission is required."
+                            else ->
+                                "Listening stopped. Tap to retry."
                         }
                     }
-                }
 
-                override fun onError(utteranceId: String?) {
-                    handler.post {
-                        resumeAfterSpeech = false
-                        status = "Speech output failed."
-                    }
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+                    override fun onRmsChanged(rmsdB: Float) {}
+                    override fun onPartialResults(
+                        partialResults: Bundle?
+                    ) {}
+                    override fun onEvent(
+                        eventType: Int,
+                        params: Bundle?
+                    ) {}
                 }
-            }
-        )
+            )
+        } else {
+            status = "Speech recognition unavailable"
+        }
 
         setContent {
             MaterialTheme {
                 Surface(
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    color = Color(0xFF050914)
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(24.dp),
-                        verticalArrangement =
-                            Arrangement.Center,
-                        horizontalAlignment =
-                            Alignment.CenterHorizontally
+                            .background(Color(0xFF050914))
+                            .padding(horizontal = 24.dp, vertical = 36.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
                         Text(
-                            "SONIC",
-                            style = MaterialTheme.typography.headlineLarge
+                            text = "SONIC",
+                            color = Color(0xFFB9EFFF),
+                            fontSize = 34.sp,
+                            letterSpacing = 8.sp
                         )
 
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(8.dp))
 
-                        Text(status)
+                        Text(
+                            text = "YOUR PERSONAL AI",
+                            color = Color(0xFF6F92B5),
+                            fontSize = 11.sp,
+                            letterSpacing = 3.sp
+                        )
 
-                        Spacer(Modifier.height(24.dp))
+                        Spacer(Modifier.weight(1f))
 
-                        Text(heardText)
-
-                        Spacer(Modifier.height(32.dp))
-
-                        Button(
-                            onClick = {
-                                if (listening) {
-                                    stopListening()
-                                } else if (
-                                    checkSelfPermission(
-                                        Manifest.permission.RECORD_AUDIO
-                                    ) == PackageManager.PERMISSION_GRANTED
-                                ) {
-                                    startListening()
-                                } else {
-                                    permissionLauncher.launch(
-                                        Manifest.permission.RECORD_AUDIO
-                                    )
+                        // Large glowing, clickable blue orb
+                        Box(
+                            modifier = Modifier
+                                .size(300.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    handleOrbTap()
                                 }
-                            }
+                                .semantics {
+                                    contentDescription =
+                                        "Sonic voice assistant. Tap to speak."
+                                },
+                            contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                if (listening)
-                                    "Stop listening"
-                                else
-                                    "🎙 Start Sonic"
-                            )
+                            Canvas(
+                                modifier = Modifier.fillMaxSize()
+                            ) {
+                                val center = Offset(
+                                    size.width / 2f,
+                                    size.height / 2f
+                                )
+
+                                val radius = size.minDimension / 2f
+
+                                // Wide, soft blue outer glow
+                                drawCircle(
+                                    brush = Brush.radialGradient(
+                                        colors = listOf(
+                                            Color(0x6650CFFF),
+                                            Color(0x333A9EFF),
+                                            Color(0x123A9EFF),
+                                            Color.Transparent
+                                        ),
+                                        center = center,
+                                        radius = radius
+                                    ),
+                                    radius = radius,
+                                    center = center
+                                )
+
+                                // Bright blue halo
+                                drawCircle(
+                                    brush = Brush.radialGradient(
+                                        colors = listOf(
+                                            Color(0x005BCBFF),
+                                            Color(0x5549CFFF),
+                                            Color(0x2249CFFF),
+                                            Color.Transparent
+                                        ),
+                                        center = center,
+                                        radius = radius * 0.78f
+                                    ),
+                                    radius = radius * 0.78f,
+                                    center = center
+                                )
+
+                                // Main luminous orb
+                                drawCircle(
+                                    brush = Brush.radialGradient(
+                                        colors = listOf(
+                                            Color(0xFFE7FCFF),
+                                            Color(0xFF75E4FF),
+                                            Color(0xFF20A9FF),
+                                            Color(0xFF1255D9),
+                                            Color(0xFF07132E)
+                                        ),
+                                        center = Offset(
+                                            center.x - radius * 0.18f,
+                                            center.y - radius * 0.20f
+                                        ),
+                                        radius = radius * 0.86f
+                                    ),
+                                    radius = radius * 0.59f,
+                                    center = center
+                                )
+
+                                // Glossy highlight
+                                drawCircle(
+                                    brush = Brush.radialGradient(
+                                        colors = listOf(
+                                            Color(0xCCFFFFFF),
+                                            Color(0x66B9F5FF),
+                                            Color.Transparent
+                                        ),
+                                        center = Offset(
+                                            center.x - radius * 0.20f,
+                                            center.y - radius * 0.29f
+                                        ),
+                                        radius = radius * 0.27f
+                                    ),
+                                    radius = radius * 0.27f,
+                                    center = Offset(
+                                        center.x - radius * 0.20f,
+                                        center.y - radius * 0.29f
+                                    )
+                                )
+                            }
                         }
+
+                        Spacer(Modifier.height(30.dp))
+
+                        Text(
+                            text = status,
+                            color = Color(0xFFB9EFFF),
+                            fontSize = 18.sp
+                        )
+
+                        Spacer(Modifier.height(12.dp))
+
+                        Text(
+                            text = heardText,
+                            color = Color(0xFF8BA6C6),
+                            fontSize = 14.sp
+                        )
+
+                        Spacer(Modifier.weight(1f))
+
+                        Text(
+                            text = if (listening)
+                                "TAP TO STOP LISTENING"
+                            else
+                                "TAP THE ORB TO SPEAK",
+                            color = Color(0xFF6685AA),
+                            fontSize = 11.sp,
+                            letterSpacing = 2.sp
+                        )
                     }
                 }
             }
         }
     }
 
-    private fun startListening() {
-        if (isFinishing || isDestroyed) return
-
-        val speechRecognizer = recognizer ?: run {
-            status = "Speech recognition isn't available."
+    private fun handleOrbTap() {
+        if (listening) {
+            recognizer?.cancel()
+            listening = false
+            status = "Sonic paused"
             return
         }
 
         if (
             checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
+            == PackageManager.PERMISSION_GRANTED
         ) {
+            startListening()
+        } else {
             permissionLauncher.launch(
                 Manifest.permission.RECORD_AUDIO
             )
+        }
+    }
+
+    private fun startListening() {
+        if (isFinishing || isDestroyed) return
+
+        val engine = recognizer
+        if (engine == null) {
+            status = "Speech recognition unavailable"
             return
         }
 
@@ -236,60 +345,47 @@ class MainActivity : ComponentActivity() {
                 RecognizerIntent.EXTRA_LANGUAGE,
                 Locale.getDefault()
             )
-            putExtra(
-                RecognizerIntent.EXTRA_PARTIAL_RESULTS,
-                false
-            )
         }
 
         try {
             status = "Starting microphone..."
-            speechRecognizer.startListening(intent)
+            engine.startListening(intent)
         } catch (e: Exception) {
             listening = false
-            status = "Couldn't start listening. Try again."
+            status = "Couldn't start. Please retry."
         }
     }
 
-    private fun stopListening() {
-        listening = false
-        resumeAfterSpeech = false
-        recognizer?.cancel()
-        tts?.stop()
-        status = "Sonic paused."
-    }
+    private fun speak(message: String) {
+        status = "Sonic is speaking..."
 
-    private fun speak(text: String, listenAgain: Boolean) {
-        resumeAfterSpeech = listenAgain
-
-        val engine = tts
-        if (engine == null) {
-            resumeAfterSpeech = false
-            status = "Speech engine isn't ready."
+        if (!ttsReady || tts == null) {
+            status = "Speech engine is not ready"
             return
         }
 
-        val result = engine.speak(
-            text,
+        val result = tts?.speak(
+            message,
             TextToSpeech.QUEUE_FLUSH,
             null,
             "sonic_reply"
         )
 
         if (result == TextToSpeech.ERROR) {
-            resumeAfterSpeech = false
             status = "Couldn't speak. Try again."
+        } else {
+            status = "Sonic replied"
         }
     }
 
     override fun onDestroy() {
-        handler.removeCallbacksAndMessages(null)
-        resumeAfterSpeech = false
         recognizer?.destroy()
         recognizer = null
+
         tts?.stop()
         tts?.shutdown()
         tts = null
+
         super.onDestroy()
     }
 }

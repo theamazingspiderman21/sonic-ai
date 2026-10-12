@@ -1,0 +1,54 @@
+
+name: Test Sonic AI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-ai:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask DeepSeek-R1
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          import urllib.error
+
+          url = "https://router.huggingface.co/v1/chat/completions"
+
+          payload = {
+              "model": "deepseek-ai/DeepSeek-R1:novita",
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": "You are Sonic, a helpful AI assistant. Introduce yourself in two sentences."
+                  }
+              ],
+              "max_tokens": 200
+          }
+
+          request = urllib.request.Request(
+              url,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={
+                  "Authorization": "Bearer " + os.environ["HF_TOKEN"],
+                  "Content-Type": "application/json"
+              },
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=90) as response:
+                  result = json.loads(response.read().decode("utf-8"))
+                  print("SONIC AI RESPONSE:")
+                  print(result["choices"][0]["message"]["content"])
+          except urllib.error.HTTPError as error:
+              print("API returned HTTP status:", error.code)
+              print(error.read().decode("utf-8")[:1500])
+              raise SystemExit(1)
+          PY
+          

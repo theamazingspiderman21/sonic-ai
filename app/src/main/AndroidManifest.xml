@@ -1,14 +1,14 @@
 
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Permission for Sonic to use the microphone -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- Allow Android 11+ to discover speech recognition services -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
     </queries>
 

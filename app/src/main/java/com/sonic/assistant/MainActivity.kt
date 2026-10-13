@@ -39,9 +39,15 @@ class MainActivity : ComponentActivity(), RecognitionListener {
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
 
-    private var heardText by mutableStateOf("Tap the orb and speak to Sonic.")
+    private var heardText by mutableStateOf(
+        "Tap the orb and speak to Sonic."
+    )
+
     private var statusText by mutableStateOf("Ready when you are")
     private var isListening by mutableStateOf(false)
+
+    @Volatile
+    private var requestGeneration = 0
 
     private val workerUrl =
         "https://sonic-ai-bridge.kulkarnit511.workers.dev"
@@ -50,8 +56,11 @@ class MainActivity : ComponentActivity(), RecognitionListener {
         registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
-            if (granted) startListening()
-            else statusText = "Microphone permission is needed."
+            if (granted) {
+                startListening()
+            } else {
+                statusText = "Microphone permission is needed."
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,17 +68,39 @@ class MainActivity : ComponentActivity(), RecognitionListener {
 
         textToSpeech = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
-                textToSpeech?.language = Locale("en", "IN")
-                textToSpeech?.setSpeechRate(0.92f)
-                textToSpeech?.setPitch(1.0f)
+                val tts = textToSpeech
+
+                if (tts != null) {
+                    val languageResult =
+                        tts.setLanguage(Locale("en", "IN"))
+
+                    // JARVIS-inspired delivery.
+                    tts.setSpeechRate(0.88f)
+                    tts.setPitch(0.82f)
+
+                    runOnUiThread {
+                        if (
+                            languageResult ==
+                            TextToSpeech.LANG_MISSING_DATA ||
+                            languageResult ==
+                            TextToSpeech.LANG_NOT_SUPPORTED
+                        ) {
+                            statusText =
+                                "English voice unavailable. Check TTS settings."
+                        }
+                    }
+                }
             }
         }
 
         if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+            speechRecognizer =
+                SpeechRecognizer.createSpeechRecognizer(this)
+
             speechRecognizer?.setRecognitionListener(this)
         } else {
-            statusText = "Speech recognition isn't available on this phone."
+            statusText =
+                "Speech recognition isn't available on this phone."
         }
 
         setContent {
@@ -85,41 +116,74 @@ class MainActivity : ComponentActivity(), RecognitionListener {
     }
 
     private fun checkMicrophoneAndListen() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED
+        // Invalidate any AI response that is still in progress.
+        requestGeneration++
+
+        // Stop the current spoken response immediately.
+        textToSpeech?.stop()
+
+        // Cancel any previous recognition session.
+        isListening = false
+        speechRecognizer?.cancel()
+
+        if (
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
         ) {
             startListening()
         } else {
-            requestPermission.launch(Manifest.permission.RECORD_AUDIO)
+            requestPermission.launch(
+                Manifest.permission.RECORD_AUDIO
+            )
         }
     }
 
     private fun startListening() {
         val recognizer = speechRecognizer ?: run {
-            statusText = "Speech recognition isn't available."
+            statusText =
+                "Speech recognition isn't available."
             return
         }
 
         try {
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(
-                    RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                )
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-IN")
-                putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            }
+            val intent =
+                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                    putExtra(
+                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                    )
+
+                    putExtra(
+                        RecognizerIntent.EXTRA_LANGUAGE,
+                        "en-IN"
+                    )
+
+                    putExtra(
+                        RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,
+                        "en-IN"
+                    )
+
+                    putExtra(
+                        RecognizerIntent.EXTRA_MAX_RESULTS,
+                        3
+                    )
+
+                    putExtra(
+                        RecognizerIntent.EXTRA_PARTIAL_RESULTS,
+                        false
+                    )
+                }
 
             heardText = "Listening for your command..."
             statusText = "I'm listening"
             isListening = true
+
             recognizer.startListening(intent)
+
         } catch (e: Exception) {
             isListening = false
-            statusText = "Couldn't start listening. Tap to try again."
+            statusText =
+                "Couldn't start listening. Tap to try again."
         }
     }
 
@@ -145,21 +209,33 @@ class MainActivity : ComponentActivity(), RecognitionListener {
     override fun onError(error: Int) {
         isListening = false
 
+        // Ignore the expected callback from cancelling recognition.
+        if (error == SpeechRecognizer.ERROR_CLIENT) {
+            return
+        }
+
         statusText = when (error) {
             SpeechRecognizer.ERROR_NO_MATCH ->
-                "I didn't catch those words. Please try again."
+                "I didn't catch those words. Try again."
+
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                "I didn't hear anything. Tap and speak again."
+                "I didn't hear anything. Speak again."
+
             SpeechRecognizer.ERROR_NETWORK,
             SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
                 "Speech recognition needs a working network."
+
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
                 "Please allow microphone access."
-            else -> "Couldn't recognize speech. Tap to try again."
+
+            else ->
+                "Couldn't recognize speech. Tap to try again."
         }
     }
 
     private fun askSonic(prompt: String) {
+        val thisGeneration = requestGeneration
+
         statusText = "Thinking..."
 
         Thread {
@@ -168,63 +244,78 @@ class MainActivity : ComponentActivity(), RecognitionListener {
             try {
                 connection = (URL(workerUrl).openConnection()
                     as HttpURLConnection).apply {
+
                     requestMethod = "POST"
                     connectTimeout = 20000
                     readTimeout = 90000
                     doOutput = true
-                    setRequestProperty("Content-Type", "application/json")
-                }
 
-                val payload = JSONObject().apply {
-                    put(
-                        "messages",
-                        JSONArray().put(
-                            JSONObject().apply {
-                                put(
-                                    "role",
-                                    "system"
-                                )
-                                put(
-                                    "content",
-                                    "You are Sonic, a friendly, concise Android voice assistant. " +
-                                        "Answer naturally in clear spoken English. " +
-                                        "Avoid markdown, tables, emojis, and long lists when replying aloud. " +
-                                        "Keep ordinary answers brief unless the user asks for detail."
-                                )
-                            }
-                        ).put(
-                            JSONObject().apply {
-                                put("role", "user")
-                                put("content", prompt)
-                            }
-                        )
+                    setRequestProperty(
+                        "Content-Type",
+                        "application/json"
                     )
                 }
 
-                connection.outputStream.use {
-                    it.write(payload.toString().toByteArray(Charsets.UTF_8))
+                val systemMessage = JSONObject().apply {
+                    put("role", "system")
+                    put(
+                        "content",
+                        "You are Sonic, a friendly, intelligent Android " +
+                            "voice assistant inspired by the calm, polished " +
+                            "delivery of a futuristic AI but with your own " +
+                            "identity. Answer naturally in clear spoken " +
+                            "English. Avoid markdown, tables, emojis, and " +
+                            "long lists when replying aloud. Keep ordinary " +
+                            "answers brief unless the user asks for detail."
+                    )
+                }
+
+                val userMessage = JSONObject().apply {
+                    put("role", "user")
+                    put("content", prompt)
+                }
+
+                val messages = JSONArray()
+                    .put(systemMessage)
+                    .put(userMessage)
+
+                val payload = JSONObject().apply {
+                    put("messages", messages)
+                }
+
+                connection.outputStream.use { output ->
+                    output.write(
+                        payload.toString()
+                            .toByteArray(Charsets.UTF_8)
+                    )
                 }
 
                 val code = connection.responseCode
+
                 val stream = if (code in 200..299) {
                     connection.inputStream
                 } else {
                     connection.errorStream
                 }
 
-                val response = stream?.bufferedReader()?.use {
-                    it.readText()
-                }.orEmpty()
+                val response = stream
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+                    .orEmpty()
 
                 if (code !in 200..299) {
                     val errorJson = try {
                         JSONObject(response).optString(
                             "details",
-                            JSONObject(response).optString("error", response)
+                            JSONObject(response).optString(
+                                "error",
+                                response
+                            )
                         )
                     } catch (_: Exception) {
                         response
                     }
+
                     throw Exception("HTTP $code: $errorJson")
                 }
 
@@ -236,24 +327,50 @@ class MainActivity : ComponentActivity(), RecognitionListener {
                     .trim()
 
                 runOnUiThread {
+                    // Never speak a reply from an interrupted request.
+                    if (thisGeneration != requestGeneration) {
+                        return@runOnUiThread
+                    }
+
+                    if (answer.isBlank()) {
+                        heardText = "I didn't receive a usable answer."
+                        statusText = "Try asking again."
+                        return@runOnUiThread
+                    }
+
                     heardText = answer
                     statusText = "Sonic is speaking"
-                    textToSpeech?.speak(
-                        answer,
-                        TextToSpeech.QUEUE_FLUSH,
-                        null,
-                        "sonic_answer"
-                    )
-                    if (textToSpeech == null) {
-                        statusText = "Answer received, but speech isn't ready."
+
+                    val tts = textToSpeech
+
+                    if (tts != null) {
+                        tts.speak(
+                            answer,
+                            TextToSpeech.QUEUE_FLUSH,
+                            null,
+                            "sonic_answer"
+                        )
+                    } else {
+                        statusText =
+                            "Answer received, but speech isn't ready."
                     }
                 }
 
             } catch (e: Exception) {
                 runOnUiThread {
-                    heardText = e.message ?: "Unknown connection error"
-                    statusText = "Couldn't reach Sonic's AI brain."
+                    // An interrupted request must not overwrite
+                    // the status of the new listening session.
+                    if (thisGeneration != requestGeneration) {
+                        return@runOnUiThread
+                    }
+
+                    heardText =
+                        e.message ?: "Unknown connection error"
+
+                    statusText =
+                        "Couldn't reach Sonic's AI brain."
                 }
+
             } finally {
                 connection?.disconnect()
             }
@@ -269,21 +386,28 @@ class MainActivity : ComponentActivity(), RecognitionListener {
     }
 
     override fun onRmsChanged(rmsdB: Float) {}
+
     override fun onBufferReceived(buffer: ByteArray?) {}
+
     override fun onEndOfSpeech() {
         isListening = false
         statusText = "Processing your words..."
     }
 
     override fun onPartialResults(partialResults: Bundle?) {}
+
     override fun onEvent(eventType: Int, params: Bundle?) {}
 
     override fun onDestroy() {
+        requestGeneration++
+
         speechRecognizer?.destroy()
         speechRecognizer = null
+
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         textToSpeech = null
+
         super.onDestroy()
     }
 }
@@ -305,28 +429,37 @@ private fun SonicScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 24.dp, vertical = 28.dp),
+                .padding(
+                    horizontal = 24.dp,
+                    vertical = 28.dp
+                ),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Text(
-                    "SONIC",
+                    text = "SONIC",
                     fontSize = 32.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 6.sp,
                     color = Color.White
                 )
+
                 Spacer(Modifier.height(8.dp))
+
                 Text(
-                    "YOUR PERSONAL AI ASSISTANT",
+                    text = "YOUR PERSONAL AI ASSISTANT",
                     fontSize = 11.sp,
                     letterSpacing = 2.sp,
                     color = Color(0xFF8295B5)
                 )
             }
 
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Box(
                     modifier = Modifier
                         .size(220.dp)
@@ -347,7 +480,9 @@ private fun SonicScreen(
                             ),
                             CircleShape
                         )
-                        .clickable { onOrbTap() },
+                        .clickable {
+                            onOrbTap()
+                        },
                     contentAlignment = Alignment.Center
                 ) {
                     Box(
@@ -369,16 +504,20 @@ private fun SonicScreen(
                 Spacer(Modifier.height(30.dp))
 
                 Text(
-                    statusText,
+                    text = statusText,
                     fontSize = 17.sp,
-                    color = if (isListening) blue else Color(0xFFDCE7FA),
+                    color = if (isListening) {
+                        blue
+                    } else {
+                        Color(0xFFDCE7FA)
+                    },
                     textAlign = TextAlign.Center
                 )
 
                 Spacer(Modifier.height(14.dp))
 
                 Text(
-                    heardText,
+                    text = heardText,
                     fontSize = 15.sp,
                     color = Color(0xFF9EAFCA),
                     textAlign = TextAlign.Center,
@@ -386,7 +525,9 @@ private fun SonicScreen(
                 )
             }
 
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Button(
                     onClick = onOrbTap,
                     shape = RoundedCornerShape(28.dp),
@@ -396,7 +537,11 @@ private fun SonicScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        if (isListening) "LISTENING..." else "TALK TO SONIC",
+                        text = if (isListening) {
+                            "LISTENING..."
+                        } else {
+                            "TALK TO SONIC"
+                        },
                         modifier = Modifier.padding(vertical = 8.dp),
                         letterSpacing = 2.sp
                     )
@@ -405,7 +550,7 @@ private fun SonicScreen(
                 Spacer(Modifier.height(12.dp))
 
                 Text(
-                    "Tap the orb or button to speak",
+                    text = "Tap the orb or button to speak",
                     fontSize = 12.sp,
                     color = Color(0xFF687B9C)
                 )

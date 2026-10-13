@@ -1,6 +1,7 @@
 
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <queries>
@@ -10,7 +11,7 @@
     </queries>
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:label="Sonic"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">

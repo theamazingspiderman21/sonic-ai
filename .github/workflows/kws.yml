@@ -1,0 +1,46 @@
+name: Generate Sonic Wake Word Files
+
+on:
+workflow_dispatch:
+
+permissions:
+contents: read
+
+jobs:
+generate:
+runs-on: ubuntu-latest
+steps:
+- name: Install tools
+run: |
+python -m pip install --upgrade pip
+pip install sherpa-onnx sentencepiece
+
+  - name: Download and prepare model
+    shell: bash
+    run: |
+      set -euo pipefail
+      MODEL="sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+      URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/${MODEL}.tar.bz2"
+
+      curl -fL "$URL" -o model.tar.bz2
+      tar -xjf model.tar.bz2
+
+      echo "HEY SONIC :1.5 #0.3" > keywords_raw.txt
+
+      sherpa-onnx-cli text2token \
+        --tokens "${MODEL}/tokens.txt" \
+        --tokens-type bpe \
+        --bpe-model "${MODEL}/bpe.model" \
+        keywords_raw.txt keywords.txt
+
+      echo "Generated keywords:"
+      cat keywords.txt
+
+  - name: Upload generated files
+    uses: actions/upload-artifact@v4
+    with:
+      name: sonic-wake-word-files
+      path: |
+        keywords.txt
+        sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/
+      if-no-files-found: error

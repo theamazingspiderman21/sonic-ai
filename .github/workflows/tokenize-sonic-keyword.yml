@@ -1,0 +1,37 @@
+
+name: Tokenize Sonic Wake Word
+
+on:
+  workflow_dispatch:
+
+jobs:
+  tokenize:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install SentencePiece
+        run: pip install sentencepiece
+
+      - name: Tokenize wake word
+        run: |
+          python - <<'PY'
+          import sentencepiece as spm
+
+          model_path = "app/src/main/assets/bpe.model"
+          sp = spm.SentencePieceProcessor(model_file=model_path)
+
+          phrase = "HEY SONIC"
+          pieces = sp.encode(phrase, out_type=str)
+
+          print("Phrase:", phrase)
+          print("Correct keyword tokens:")
+          print(" ".join(pieces))
+          PY

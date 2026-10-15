@@ -4,6 +4,9 @@ name: Tokenize Sonic Wake Word
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   tokenize:
     runs-on: ubuntu-latest
@@ -22,7 +25,7 @@ jobs:
 
       - name: Tokenize wake word
         run: |
-          python - <<'PY'
+          python - <<'PY' | tee tokens-output.txt
           import sentencepiece as spm
 
           model_path = "app/src/main/assets/bpe.model"
@@ -35,3 +38,16 @@ jobs:
           print("Correct keyword tokens:")
           print(" ".join(pieces))
           PY
+
+          {
+            echo "## Sonic Wake Word Tokens"
+            echo '```text'
+            cat tokens-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save token output
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonic-keyword-tokens
+          path: tokens-output.txt

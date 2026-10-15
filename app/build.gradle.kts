@@ -42,7 +42,11 @@ implementation("androidx.compose.ui:ui-graphics")
 implementation("androidx.compose.ui:ui-tooling-preview")
 implementation("androidx.compose.material3:material3")
 
-// Sherpa-ONNX: offline speech and keyword-spotting engine
-implementation("com.github.k2-fsa:sherpa-onnx:1.13.8")
+implementation("com.github.k2-fsa:sherpa-onnx:1.13.8") {
+    exclude(
+        group = "com.github.k2-fsa",
+        module = "sherpa-onnx-jvm"
+    )
+}
 
 }

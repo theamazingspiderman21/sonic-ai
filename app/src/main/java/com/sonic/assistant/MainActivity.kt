@@ -2,559 +2,282 @@
 package com.sonic.assistant
 
 import android.Manifest
-import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.Locale
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.k2fsa.sherpa.onnx.FeatureConfig
+import com.k2fsa.sherpa.onnx.KeywordSpotter
+import com.k2fsa.sherpa.onnx.KeywordSpotterConfig
+import com.k2fsa.sherpa.onnx.OnlineModelConfig
+import com.k2fsa.sherpa.onnx.OnlineStream
+import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
+import kotlin.concurrent.thread
 
-class MainActivity : ComponentActivity(), RecognitionListener {
+class MainActivity : ComponentActivity() {
 
-    private var speechRecognizer: SpeechRecognizer? = null
-    private var textToSpeech: TextToSpeech? = null
+    private val sampleRate = 16000
 
-    private var heardText by mutableStateOf(
-        "Tap the orb and speak to Sonic."
-    )
-
-    private var statusText by mutableStateOf("Ready when you are")
-    private var isListening by mutableStateOf(false)
+    private var spotter: KeywordSpotter? = null
+    private var stream: OnlineStream? = null
+    private var recorder: AudioRecord? = null
+    private var worker: Thread? = null
 
     @Volatile
-    private var requestGeneration = 0
+    private var listening = false
 
-    private val workerUrl =
-        "https://sonic-ai-bridge.kulkarnit511.workers.dev"
-
-    private val requestPermission =
-        registerForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted ->
-            if (granted) {
-                startListening()
-            } else {
-                statusText = "Microphone permission is needed."
-            }
-        }
+    private var status by mutableStateOf("Sonic is ready")
+    private var detected by mutableStateOf("Say: Hey Sonic")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        textToSpeech = TextToSpeech(this) { result ->
-            if (result == TextToSpeech.SUCCESS) {
-                val tts = textToSpeech
+        setContent {
+            MaterialTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text("SONIC", style = MaterialTheme.typography.headlineLarge)
+                        Spacer(Modifier.height(24.dp))
+                        Text(status)
+                        Spacer(Modifier.height(12.dp))
+                        Text(detected)
+                        Spacer(Modifier.height(24.dp))
 
-                if (tts != null) {
-                    val languageResult =
-                        tts.setLanguage(Locale("en", "IN"))
-
-                    // JARVIS-inspired delivery.
-                    tts.setSpeechRate(0.88f)
-                    tts.setPitch(0.82f)
-
-                    runOnUiThread {
-                        if (
-                            languageResult ==
-                            TextToSpeech.LANG_MISSING_DATA ||
-                            languageResult ==
-                            TextToSpeech.LANG_NOT_SUPPORTED
+                        Button(
+                            onClick = {
+                                if (listening) {
+                                    stopListening()
+                                } else {
+                                    requestAndStart()
+                                }
+                            }
                         ) {
-                            statusText =
-                                "English voice unavailable. Check TTS settings."
+                            Text(if (listening) "Stop listening" else "Start listening")
                         }
                     }
                 }
             }
         }
-
-        if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            speechRecognizer =
-                SpeechRecognizer.createSpeechRecognizer(this)
-
-            speechRecognizer?.setRecognitionListener(this)
-        } else {
-            statusText =
-                "Speech recognition isn't available on this phone."
-        }
-
-        setContent {
-            MaterialTheme {
-                SonicScreen(
-                    heardText = heardText,
-                    statusText = statusText,
-                    isListening = isListening,
-                    onOrbTap = { checkMicrophoneAndListen() }
-                )
-            }
-        }
     }
 
-    private fun checkMicrophoneAndListen() {
-        // Invalidate any AI response that is still in progress.
-        requestGeneration++
+    private fun requestAndStart() {
+        if (ContextCompat.checkSelfPermission(
+                this, Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.RECORD_AUDIO),
+                101
+            )
+            return
+        }
 
-        // Stop the current spoken response immediately.
-        textToSpeech?.stop()
+        startListening()
+    }
 
-        // Cancel any previous recognition session.
-        isListening = false
-        speechRecognizer?.cancel()
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
-        if (
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
+        if (requestCode == 101 &&
+            grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
         ) {
             startListening()
-        } else {
-            requestPermission.launch(
-                Manifest.permission.RECORD_AUDIO
-            )
+        } else if (requestCode == 101) {
+            status = "Microphone permission is required"
         }
     }
 
     private fun startListening() {
-        val recognizer = speechRecognizer ?: run {
-            statusText =
-                "Speech recognition isn't available."
-            return
-        }
+        if (listening) return
 
-        try {
-            val intent =
-                Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                    putExtra(
-                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                    )
+        status = "Loading wake-word model..."
+        detected = "Say: Hey Sonic"
 
-                    putExtra(
-                        RecognizerIntent.EXTRA_LANGUAGE,
-                        "en-IN"
-                    )
-
-                    putExtra(
-                        RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,
-                        "en-IN"
-                    )
-
-                    putExtra(
-                        RecognizerIntent.EXTRA_MAX_RESULTS,
-                        3
-                    )
-
-                    putExtra(
-                        RecognizerIntent.EXTRA_PARTIAL_RESULTS,
-                        false
-                    )
-                }
-
-            heardText = "Listening for your command..."
-            statusText = "I'm listening"
-            isListening = true
-
-            recognizer.startListening(intent)
-
-        } catch (e: Exception) {
-            isListening = false
-            statusText =
-                "Couldn't start listening. Tap to try again."
-        }
-    }
-
-    override fun onResults(results: Bundle?) {
-        isListening = false
-
-        val alternatives = results?.getStringArrayList(
-            SpeechRecognizer.RESULTS_RECOGNITION
-        )
-
-        val recognized = alternatives?.firstOrNull()?.trim()
-
-        if (recognized.isNullOrBlank()) {
-            heardText = "I didn't catch that."
-            statusText = "Tap the orb and try again."
-            return
-        }
-
-        heardText = "You said: $recognized"
-        askSonic(recognized)
-    }
-
-    override fun onError(error: Int) {
-        isListening = false
-
-        // Ignore the expected callback from cancelling recognition.
-        if (error == SpeechRecognizer.ERROR_CLIENT) {
-            return
-        }
-
-        statusText = when (error) {
-            SpeechRecognizer.ERROR_NO_MATCH ->
-                "I didn't catch those words. Try again."
-
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
-                "I didn't hear anything. Speak again."
-
-            SpeechRecognizer.ERROR_NETWORK,
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                "Speech recognition needs a working network."
-
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS ->
-                "Please allow microphone access."
-
-            else ->
-                "Couldn't recognize speech. Tap to try again."
-        }
-    }
-
-    private fun askSonic(prompt: String) {
-        val thisGeneration = requestGeneration
-
-        statusText = "Thinking..."
-
-        Thread {
-            var connection: HttpURLConnection? = null
-
+        worker = thread(start = true, name = "SonicWakeWord") {
             try {
-                connection = (URL(workerUrl).openConnection()
-                    as HttpURLConnection).apply {
+                val model = OnlineModelConfig(
+                    transducer = OnlineTransducerModelConfig(
+                        encoder = "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                        decoder = "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+                        joiner = "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx"
+                    ),
+                    tokens = "tokens.txt",
+                    numThreads = 2,
+                    provider = "cpu",
+                    modelType = "zipformer2",
+                    modelingUnit = "bpe",
+                    bpeVocab = "bpe.model"
+                )
 
-                    requestMethod = "POST"
-                    connectTimeout = 20000
-                    readTimeout = 90000
-                    doOutput = true
+                val config = KeywordSpotterConfig(
+                    featConfig = FeatureConfig(
+                        samplingRate = sampleRate,
+                        featureDim = 80
+                    ),
+                    modelConfig = model,
+                    keywordsFile = "keywords.txt",
+                    keywordsScore = 1.5f,
+                    keywordsThreshold = 0.25f,
+                    numTrailingBlanks = 2
+                )
 
-                    setRequestProperty(
-                        "Content-Type",
-                        "application/json"
+                val kws = KeywordSpotter(
+                    assetManager = assets,
+                    config = config
+                )
+                spotter = kws
+
+                val audioBufferSize = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+
+                if (audioBufferSize <= 0) {
+                    throw IllegalStateException(
+                        "This device does not support the requested microphone format"
                     )
                 }
 
-                val systemMessage = JSONObject().apply {
-                    put("role", "system")
-                    put(
-                        "content",
-                        "You are Sonic, a friendly, intelligent Android " +
-                            "voice assistant inspired by the calm, polished " +
-                            "delivery of a futuristic AI but with your own " +
-                            "identity. Answer naturally in clear spoken " +
-                            "English. Avoid markdown, tables, emojis, and " +
-                            "long lists when replying aloud. Keep ordinary " +
-                            "answers brief unless the user asks for detail."
-                    )
+                val audio = AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    audioBufferSize * 2
+                )
+                recorder = audio
+
+                if (audio.state != AudioRecord.STATE_INITIALIZED) {
+                    throw IllegalStateException("Microphone could not be initialized")
                 }
 
-                val userMessage = JSONObject().apply {
-                    put("role", "user")
-                    put("content", prompt)
-                }
+                val kwsStream = kws.createStream()
+                stream = kwsStream
 
-                val messages = JSONArray()
-                    .put(systemMessage)
-                    .put(userMessage)
-
-                val payload = JSONObject().apply {
-                    put("messages", messages)
-                }
-
-                connection.outputStream.use { output ->
-                    output.write(
-                        payload.toString()
-                            .toByteArray(Charsets.UTF_8)
-                    )
-                }
-
-                val code = connection.responseCode
-
-                val stream = if (code in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream
-                }
-
-                val response = stream
-                    ?.bufferedReader()
-                    ?.use { it.readText() }
-                    .orEmpty()
-
-                if (code !in 200..299) {
-                    val errorJson = try {
-                        JSONObject(response).optString(
-                            "details",
-                            JSONObject(response).optString(
-                                "error",
-                                response
-                            )
-                        )
-                    } catch (_: Exception) {
-                        response
-                    }
-
-                    throw Exception("HTTP $code: $errorJson")
-                }
-
-                val answer = JSONObject(response)
-                    .getJSONArray("choices")
-                    .getJSONObject(0)
-                    .getJSONObject("message")
-                    .getString("content")
-                    .trim()
+                audio.startRecording()
+                listening = true
 
                 runOnUiThread {
-                    // Never speak a reply from an interrupted request.
-                    if (thisGeneration != requestGeneration) {
-                        return@runOnUiThread
-                    }
-
-                    if (answer.isBlank()) {
-                        heardText = "I didn't receive a usable answer."
-                        statusText = "Try asking again."
-                        return@runOnUiThread
-                    }
-
-                    heardText = answer
-                    statusText = "Sonic is speaking"
-
-                    val tts = textToSpeech
-
-                    if (tts != null) {
-                        tts.speak(
-                            answer,
-                            TextToSpeech.QUEUE_FLUSH,
-                            null,
-                            "sonic_answer"
-                        )
-                    } else {
-                        statusText =
-                            "Answer received, but speech isn't ready."
-                    }
+                    status = "Listening for Hey Sonic..."
                 }
 
+                val shortBuffer = ShortArray( audioBufferSize / 2 )
+
+                while (listening && !Thread.currentThread().isInterrupted) {
+                    val count = audio.read(
+                        shortBuffer, 0, shortBuffer.size
+                    )
+
+                    if (count <= 0) continue
+
+                    val samples = FloatArray(count) {
+                        shortBuffer[it] / 32768.0f
+                    }
+
+                    kwsStream.acceptWaveform(
+                        samples,
+                        sampleRate = sampleRate
+                    )
+
+                    while (kws.isReady(kwsStream)) {
+                        kws.decode(kwsStream)
+
+                        val keyword = kws.getResult(kwsStream).keyword
+
+                        if (keyword.isNotBlank()) {
+                            kws.reset(kwsStream)
+
+                            runOnUiThread {
+                                detected = "Detected: $keyword"
+                                status = "Hey Sonic detected!"
+                            }
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 runOnUiThread {
-                    // An interrupted request must not overwrite
-                    // the status of the new listening session.
-                    if (thisGeneration != requestGeneration) {
-                        return@runOnUiThread
-                    }
-
-                    heardText =
-                        e.message ?: "Unknown connection error"
-
-                    statusText =
-                        "Couldn't reach Sonic's AI brain."
+                    status = "Error: ${e.message ?: "Could not start wake-word detection"}"
                 }
-
             } finally {
-                connection?.disconnect()
-            }
-        }.start()
-    }
+                listening = false
 
-    override fun onReadyForSpeech(params: Bundle?) {
-        statusText = "Listening..."
-    }
-
-    override fun onBeginningOfSpeech() {
-        statusText = "Hearing you..."
-    }
-
-    override fun onRmsChanged(rmsdB: Float) {}
-
-    override fun onBufferReceived(buffer: ByteArray?) {}
-
-    override fun onEndOfSpeech() {
-        isListening = false
-        statusText = "Processing your words..."
-    }
-
-    override fun onPartialResults(partialResults: Bundle?) {}
-
-    override fun onEvent(eventType: Int, params: Bundle?) {}
-
-    override fun onDestroy() {
-        requestGeneration++
-
-        speechRecognizer?.destroy()
-        speechRecognizer = null
-
-        textToSpeech?.stop()
-        textToSpeech?.shutdown()
-        textToSpeech = null
-
-        super.onDestroy()
-    }
-}
-
-@Composable
-private fun SonicScreen(
-    heardText: String,
-    statusText: String,
-    isListening: Boolean,
-    onOrbTap: () -> Unit
-) {
-    val background = Color(0xFF070B16)
-    val blue = Color(0xFF28A9FF)
-
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = background
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(
-                    horizontal = 24.dp,
-                    vertical = 28.dp
-                ),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = "SONIC",
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 6.sp,
-                    color = Color.White
-                )
-
-                Spacer(Modifier.height(8.dp))
-
-                Text(
-                    text = "YOUR PERSONAL AI ASSISTANT",
-                    fontSize = 11.sp,
-                    letterSpacing = 2.sp,
-                    color = Color(0xFF8295B5)
-                )
-            }
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(220.dp)
-                        .shadow(
-                            elevation = 28.dp,
-                            shape = CircleShape,
-                            ambientColor = blue,
-                            spotColor = blue
-                        )
-                        .background(
-                            Brush.radialGradient(
-                                colors = listOf(
-                                    Color(0xFFB8F1FF),
-                                    Color(0xFF28A9FF),
-                                    Color(0xFF1244B5),
-                                    background
-                                )
-                            ),
-                            CircleShape
-                        )
-                        .clickable {
-                            onOrbTap()
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(150.dp)
-                            .background(
-                                Brush.radialGradient(
-                                    colors = listOf(
-                                        Color(0xFFB6F5FF),
-                                        Color(0xFF42B7FF),
-                                        Color(0xFF1452D0)
-                                    )
-                                ),
-                                CircleShape
-                            )
-                    )
+                try {
+                    recorder?.let {
+                        if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                            it.stop()
+                        }
+                        it.release()
+                    }
+                } catch (_: Exception) {
                 }
 
-                Spacer(Modifier.height(30.dp))
+                recorder = null
 
-                Text(
-                    text = statusText,
-                    fontSize = 17.sp,
-                    color = if (isListening) {
-                        blue
-                    } else {
-                        Color(0xFFDCE7FA)
-                    },
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(Modifier.height(14.dp))
-
-                Text(
-                    text = heardText,
-                    fontSize = 15.sp,
-                    color = Color(0xFF9EAFCA),
-                    textAlign = TextAlign.Center,
-                    lineHeight = 23.sp
-                )
-            }
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Button(
-                    onClick = onOrbTap,
-                    shape = RoundedCornerShape(28.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF1266D6)
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = if (isListening) {
-                            "LISTENING..."
-                        } else {
-                            "TALK TO SONIC"
-                        },
-                        modifier = Modifier.padding(vertical = 8.dp),
-                        letterSpacing = 2.sp
-                    )
+                try {
+                    stream?.release()
+                } catch (_: Exception) {
                 }
 
-                Spacer(Modifier.height(12.dp))
+                stream = null
 
-                Text(
-                    text = "Tap the orb or button to speak",
-                    fontSize = 12.sp,
-                    color = Color(0xFF687B9C)
-                )
+                try {
+                    spotter?.release()
+                } catch (_: Exception) {
+                }
+
+                spotter = null
             }
         }
+    }
+
+    private fun stopListening() {
+        listening = false
+
+        try {
+            recorder?.stop()
+        } catch (_: Exception) {
+        }
+
+        status = "Stopped"
+        detected = "Tap Start listening to try again"
+    }
+
+    override fun onDestroy() {
+        stopListening()
+        super.onDestroy()
     }
 }

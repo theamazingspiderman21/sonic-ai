@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
 
 import androidx.activity.ComponentActivity
@@ -45,6 +46,9 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var listening = false
 
+    @Volatile
+    private var stopRequested = false
+
     private var recorder: AudioRecord? = null
     private var spotter: KeywordSpotter? = null
     private var stream: OnlineStream? = null
@@ -52,7 +56,9 @@ class MainActivity : ComponentActivity() {
 
     private var status by mutableStateOf("Sonic is ready")
     private var detected by mutableStateOf("Say: Hey Sonic")
-    private var diagnostics by mutableStateOf("Mic: not started | Decodes: 0")
+    private var diagnostics by mutableStateOf(
+        "Mic: not started\nReads: 0 | Decodes: 0"
+    )
 
     private val microphonePermissionLauncher =
         registerForActivityResult(
@@ -61,7 +67,8 @@ class MainActivity : ComponentActivity() {
             if (granted) {
                 startListening()
             } else {
-                status = "Microphone permission is required"
+                status = "Microphone permission denied"
+                diagnostics = "Allow microphone access in app settings"
             }
         }
 
@@ -91,7 +98,7 @@ class MainActivity : ComponentActivity() {
                         Spacer(Modifier.height(12.dp))
                         Text(detected)
 
-                        Spacer(Modifier.height(12.dp))
+                        Spacer(Modifier.height(16.dp))
                         Text(diagnostics)
 
                         Spacer(Modifier.height(24.dp))
@@ -135,10 +142,12 @@ class MainActivity : ComponentActivity() {
     private fun startListening() {
         if (listening) return
 
+        stopRequested = false
         listening = true
+
         status = "Loading wake-word model..."
         detected = "Say: Hey Sonic"
-        diagnostics = "Mic: starting | Decodes: 0"
+        diagnostics = "Initializing microphone..."
 
         worker = thread(
             start = true,
@@ -149,6 +158,7 @@ class MainActivity : ComponentActivity() {
             var localRecorder: AudioRecord? = null
 
             try {
+                // Load the existing Sherpa-ONNX wake-word model.
                 val modelConfig = OnlineModelConfig(
                     transducer = OnlineTransducerModelConfig(
                         encoder =
@@ -186,6 +196,7 @@ class MainActivity : ComponentActivity() {
 
                 if (!listening) return@thread
 
+                // Ask Android for the minimum audio buffer size.
                 val minBufferSize = AudioRecord.getMinBufferSize(
                     sampleRate,
                     AudioFormat.CHANNEL_IN_MONO,
@@ -194,27 +205,77 @@ class MainActivity : ComponentActivity() {
 
                 if (minBufferSize <= 0) {
                     throw IllegalStateException(
-                        "Unsupported microphone audio format: $minBufferSize"
+                        "Unsupported audio format. Buffer result: $minBufferSize"
                     )
                 }
 
-                localRecorder = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    minBufferSize * 2
+                val bufferSize = maxOf(
+                    minBufferSize * 2,
+                    sampleRate * 2
                 )
-                recorder = localRecorder
 
-                if (
-                    localRecorder.state !=
-                    AudioRecord.STATE_INITIALIZED
-                ) {
-                    throw IllegalStateException(
-                        "Could not initialize microphone"
+                // Try unprocessed audio first when available.
+                // Fall back to the standard microphone source if
+                // the first recorder cannot initialize.
+                val sources = mutableListOf<Pair<Int, String>>()
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    sources.add(
+                        Pair(
+                            MediaRecorder.AudioSource.UNPROCESSED,
+                            "UNPROCESSED"
+                        )
                     )
                 }
+
+                sources.add(
+                    Pair(
+                        MediaRecorder.AudioSource.MIC,
+                        "MIC"
+                    )
+                )
+
+                var selectedSource = "Unknown"
+
+                for ((source, sourceName) in sources) {
+                    if (!listening) return@thread
+
+                    var candidate: AudioRecord? = null
+
+                    try {
+                        candidate = AudioRecord(
+                            source,
+                            sampleRate,
+                            AudioFormat.CHANNEL_IN_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            bufferSize
+                        )
+
+                        if (
+                            candidate.state ==
+                            AudioRecord.STATE_INITIALIZED
+                        ) {
+                            localRecorder = candidate
+                            selectedSource = sourceName
+                            break
+                        }
+                    } catch (_: Exception) {
+                        // Try the next supported audio source.
+                    }
+
+                    try {
+                        candidate?.release()
+                    } catch (_: Exception) {
+                    }
+                }
+
+                if (localRecorder == null) {
+                    throw IllegalStateException(
+                        "Could not initialize UNPROCESSED or MIC audio"
+                    )
+                }
+
+                recorder = localRecorder
 
                 localStream = localSpotter.createStream()
                 stream = localStream
@@ -223,16 +284,31 @@ class MainActivity : ComponentActivity() {
 
                 localRecorder.startRecording()
 
+                if (
+                    localRecorder.recordingState !=
+                    AudioRecord.RECORDSTATE_RECORDING
+                ) {
+                    throw IllegalStateException(
+                        "Microphone did not enter recording state"
+                    )
+                }
+
                 runOnUiThread {
                     status = "Listening for Hey Sonic..."
+                    diagnostics = "Source: $selectedSource\nCollecting audio..."
                 }
 
                 val audioBuffer = ShortArray(
-                    (minBufferSize / 2).coerceAtLeast(1024)
+                    maxOf(bufferSize / 2, 2048)
                 )
 
-                var lastDiagnosticUpdate = 0L
+                var lastDiagnosticUpdate = System.currentTimeMillis()
+
+                var readCount = 0L
                 var decodedFrames = 0L
+                var totalSamples = 0L
+                var sumSquares = 0.0
+                var peak = 0
 
                 while (
                     listening &&
@@ -241,42 +317,46 @@ class MainActivity : ComponentActivity() {
                     val count = localRecorder.read(
                         audioBuffer,
                         0,
-                        audioBuffer.size
+                        audioBuffer.size,
+                        AudioRecord.READ_BLOCKING
                     )
 
                     if (count < 0) {
                         throw IllegalStateException(
-                            "Microphone read failed: $count"
+                            "AudioRecord.read failed: $count"
                         )
                     }
 
                     if (count == 0) continue
 
+                    readCount++
+
                     val samples = FloatArray(count) { index ->
                         audioBuffer[index] / 32768.0f
                     }
 
-                    var sumSquares = 0.0
-
-                    for (sample in samples) {
+                    // Accumulate audio measurements over the
+                    // diagnostic interval rather than sampling
+                    // only one possibly silent buffer.
+                    for (index in 0 until count) {
+                        val sample = samples[index].toDouble()
                         sumSquares += sample * sample
-                    }
 
-                    val audioLevel = sqrt(sumSquares / count)
-                    val now = System.currentTimeMillis()
+                        val absoluteValue =
+                            kotlin.math.abs(audioBuffer[index].toInt())
 
-                    if (now - lastDiagnosticUpdate >= 1000L) {
-                        lastDiagnosticUpdate = now
-
-                        val level = (audioLevel * 1000).toInt()
-
-                        runOnUiThread {
-                            diagnostics =
-                                "Mic: $level | Decodes: $decodedFrames"
+                        if (absoluteValue > peak) {
+                            peak = absoluteValue
                         }
                     }
 
-                    localStream.acceptWaveform(samples, sampleRate)
+                    totalSamples += count
+
+                    // Feed captured audio to the wake-word detector.
+                    localStream.acceptWaveform(
+                        samples,
+                        sampleRate
+                    )
 
                     while (
                         listening &&
@@ -293,18 +373,52 @@ class MainActivity : ComponentActivity() {
 
                             runOnUiThread {
                                 detected = "Detected: $keyword"
-                                status = "Hey Sonic detected!"
+                                status = "Wake word detected!"
                             }
                         }
+                    }
+
+                    val now = System.currentTimeMillis()
+
+                    if (now - lastDiagnosticUpdate >= 1000L) {
+                        val rms = if (totalSamples > 0) {
+                            sqrt(sumSquares / totalSamples)
+                        } else {
+                            0.0
+                        }
+
+                        val rmsMilli = (rms * 1000).toInt()
+                        val peakValue = peak
+
+                        val readsSnapshot = readCount
+                        val decodesSnapshot = decodedFrames
+                        val samplesSnapshot = totalSamples
+
+                        runOnUiThread {
+                            diagnostics =
+                                "Source: $selectedSource\n" +
+                                "RMS: $rmsMilli / 1000\n" +
+                                "Peak: $peakValue / 32768\n" +
+                                "Reads: $readsSnapshot\n" +
+                                "Samples: $samplesSnapshot\n" +
+                                "Decodes: $decodesSnapshot"
+                        }
+
+                        lastDiagnosticUpdate = now
+                        sumSquares = 0.0
+                        peak = 0
+                        totalSamples = 0L
                     }
                 }
 
             } catch (e: Exception) {
-                if (listening) {
+                if (listening && !stopRequested) {
+                    val errorMessage =
+                        e.message ?: e.javaClass.simpleName
+
                     runOnUiThread {
-                        status = "Error: ${
-                            e.message ?: "Wake-word detection failed"
-                        }"
+                        status = "Error: $errorMessage"
+                        diagnostics = "Detector failed to start or continue"
                     }
                 }
             } finally {
@@ -341,11 +455,11 @@ class MainActivity : ComponentActivity() {
                 worker = null
 
                 runOnUiThread {
-                    if (status.startsWith("Error:")) {
-                        diagnostics = "Detector stopped"
-                    } else if (status != "Stopped") {
+                    if (stopRequested) {
+                        status = "Stopped"
+                        diagnostics = "Microphone released"
+                    } else if (!status.startsWith("Error:")) {
                         status = "Listening stopped"
-                        diagnostics = "Mic: stopped"
                     }
                 }
             }
@@ -353,8 +467,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopListening() {
+        stopRequested = true
         listening = false
 
+        // Stop a blocking microphone read so the worker can exit.
         try {
             recorder?.let { audio ->
                 if (
@@ -367,9 +483,8 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) {
         }
 
-        status = "Stopped"
+        status = "Stopping..."
         detected = "Tap Start listening to try again"
-        diagnostics = "Mic: stopped"
     }
 
     override fun onDestroy() {

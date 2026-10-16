@@ -36,6 +36,7 @@ import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 
 import kotlin.concurrent.thread
+import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
 
@@ -51,6 +52,7 @@ class MainActivity : ComponentActivity() {
 
     private var status by mutableStateOf("Sonic is ready")
     private var detected by mutableStateOf("Say: Hey Sonic")
+    private var diagnostics by mutableStateOf("Mic: not started | Decodes: 0")
 
     private val microphonePermissionLauncher =
         registerForActivityResult(
@@ -84,12 +86,13 @@ class MainActivity : ComponentActivity() {
                         )
 
                         Spacer(Modifier.height(24.dp))
-
                         Text(status)
 
                         Spacer(Modifier.height(12.dp))
-
                         Text(detected)
+
+                        Spacer(Modifier.height(12.dp))
+                        Text(diagnostics)
 
                         Spacer(Modifier.height(24.dp))
 
@@ -135,6 +138,7 @@ class MainActivity : ComponentActivity() {
         listening = true
         status = "Loading wake-word model..."
         detected = "Say: Hey Sonic"
+        diagnostics = "Mic: starting | Decodes: 0"
 
         worker = thread(
             start = true,
@@ -190,7 +194,7 @@ class MainActivity : ComponentActivity() {
 
                 if (minBufferSize <= 0) {
                     throw IllegalStateException(
-                        "Unsupported microphone audio format"
+                        "Unsupported microphone audio format: $minBufferSize"
                     )
                 }
 
@@ -227,36 +231,59 @@ class MainActivity : ComponentActivity() {
                     (minBufferSize / 2).coerceAtLeast(1024)
                 )
 
-                while (listening && !Thread.currentThread().isInterrupted) {
+                var lastDiagnosticUpdate = 0L
+                var decodedFrames = 0L
+
+                while (
+                    listening &&
+                    !Thread.currentThread().isInterrupted
+                ) {
                     val count = localRecorder.read(
                         audioBuffer,
                         0,
                         audioBuffer.size
                     )
 
-                    if (count <= 0) {
-                        if (count < 0) {
-                            throw IllegalStateException(
-                                "Microphone read failed: $count"
-                            )
-                        }
-                        continue
+                    if (count < 0) {
+                        throw IllegalStateException(
+                            "Microphone read failed: $count"
+                        )
                     }
+
+                    if (count == 0) continue
 
                     val samples = FloatArray(count) { index ->
                         audioBuffer[index] / 32768.0f
                     }
 
-                    localStream.acceptWaveform(
-                        samples,
-                        sampleRate
-                    )
+                    var sumSquares = 0.0
+
+                    for (sample in samples) {
+                        sumSquares += sample * sample
+                    }
+
+                    val audioLevel = sqrt(sumSquares / count)
+                    val now = System.currentTimeMillis()
+
+                    if (now - lastDiagnosticUpdate >= 1000L) {
+                        lastDiagnosticUpdate = now
+
+                        val level = (audioLevel * 1000).toInt()
+
+                        runOnUiThread {
+                            diagnostics =
+                                "Mic: $level | Decodes: $decodedFrames"
+                        }
+                    }
+
+                    localStream.acceptWaveform(samples, sampleRate)
 
                     while (
                         listening &&
                         localSpotter.isReady(localStream)
                     ) {
                         localSpotter.decode(localStream)
+                        decodedFrames++
 
                         val keyword =
                             localSpotter.getResult(localStream).keyword
@@ -312,6 +339,15 @@ class MainActivity : ComponentActivity() {
                 stream = null
                 spotter = null
                 worker = null
+
+                runOnUiThread {
+                    if (status.startsWith("Error:")) {
+                        diagnostics = "Detector stopped"
+                    } else if (status != "Stopped") {
+                        status = "Listening stopped"
+                        diagnostics = "Mic: stopped"
+                    }
+                }
             }
         }
     }
@@ -333,6 +369,7 @@ class MainActivity : ComponentActivity() {
 
         status = "Stopped"
         detected = "Tap Start listening to try again"
+        diagnostics = "Mic: stopped"
     }
 
     override fun onDestroy() {

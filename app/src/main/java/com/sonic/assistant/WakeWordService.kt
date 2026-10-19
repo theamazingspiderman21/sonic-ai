@@ -691,82 +691,106 @@ class WakeWordService : Service() {
         }
     }
 
-    private fun askSonicAI(command: String) {
-        updateNotification("Thinking...")
+    
+private fun askSonicAI(command: String) {
+    updateNotification("Connecting to Sonic AI...")
 
-        thread(name = "SonicAIRequest") {
-            var answer: String? = null
+    thread(name = "SonicAIRequest") {
+        var answer: String? = null
+        var errorMessage: String? = null
 
-            try {
-                val connection =
-                    (URL(AI_URL).openConnection() as HttpURLConnection)
+        var connection: HttpURLConnection? = null
 
-                try {
-                    connection.requestMethod = "POST"
-                    connection.connectTimeout = 15000
-                    connection.readTimeout = 30000
-                    connection.doOutput = true
-                    connection.setRequestProperty(
-                        "Content-Type",
-                        "application/json; charset=UTF-8"
-                    )
+        try {
+            connection =
+                URL(AI_URL).openConnection() as HttpURLConnection
 
-                    val body = JSONObject()
-                        .put("message", command)
-                        .toString()
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 20000
+            connection.readTimeout = 45000
+            connection.doOutput = true
+            connection.setRequestProperty(
+                "Content-Type",
+                "application/json; charset=UTF-8"
+            )
 
-                    connection.outputStream.use { output ->
-                        output.write(body.toByteArray(Charsets.UTF_8))
-                    }
+            val messages = org.json.JSONArray().put(
+                JSONObject()
+                    .put("role", "user")
+                    .put("content", command)
+            )
 
-                    val statusCode = connection.responseCode
+            val body = JSONObject()
+                .put("messages", messages)
+                .toString()
 
-                    val stream = if (statusCode in 200..299) {
-                        connection.inputStream
-                    } else {
-                        connection.errorStream
-                    }
-
-                    val responseBody = stream?.bufferedReader()?.use {
-                        it.readText()
-                    }.orEmpty()
-
-                    if (statusCode in 200..299) {
-                        val json = JSONObject(responseBody)
-
-                        answer = json.optString("response")
-                            .takeIf { it.isNotBlank() }
-                            ?: json.optString("answer")
-                                .takeIf { it.isNotBlank() }
-                            ?: json.optString("text")
-                                .takeIf { it.isNotBlank() }
-                            ?: json.optString("output")
-                                .takeIf { it.isNotBlank() }
-                    }
-                } finally {
-                    connection.disconnect()
-                }
-            } catch (_: Exception) {
-                answer = null
+            connection.outputStream.use { output ->
+                output.write(body.toByteArray(Charsets.UTF_8))
             }
 
-            mainHandler.post {
-                if (!serviceActive) return@post
+            val statusCode = connection.responseCode
 
-                val reply = answer
-
-                if (!reply.isNullOrBlank()) {
-                    updateNotification("Sonic replied")
-                    speakText(reply, ::startWakeWordLoop)
+            val responseStream =
+                if (statusCode in 200..299) {
+                    connection.inputStream
                 } else {
-                    speakText(
-                        "Sorry, I couldn't get a response. Please try again.",
-                        ::startWakeWordLoop
-                    )
+                    connection.errorStream
                 }
+
+            val responseBody =
+                responseStream?.bufferedReader()?.use {
+                    it.readText()
+                }.orEmpty()
+
+            if (statusCode in 200..299) {
+                val json = JSONObject(responseBody)
+
+                answer = json.optJSONObject("choices")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("message")
+                    ?.optString("content")
+                    ?.takeIf { it.isNotBlank() }
+
+                if (answer.isNullOrBlank()) {
+                    errorMessage =
+                        "Cloudflare returned no answer. Response: " +
+                        responseBody.take(300)
+                }
+            } else {
+                errorMessage =
+                    "Cloudflare HTTP $statusCode: " +
+                    responseBody.take(400)
+            }
+        } catch (e: Exception) {
+            errorMessage =
+                "${e.javaClass.simpleName}: " +
+                (e.message ?: "Unknown connection error")
+        } finally {
+            connection?.disconnect()
+        }
+
+        mainHandler.post {
+            if (!serviceActive) return@post
+
+            if (!answer.isNullOrBlank()) {
+                updateNotification("Sonic AI replied")
+                speakText(answer!!, ::startWakeWordLoop)
+            } else {
+                val message = errorMessage
+                    ?: "Unknown AI connection error"
+
+                updateNotification("Sonic AI error: $message")
+
+                speakText(
+                    "I couldn't get an AI answer. " +
+                    "Check the Sonic notification for the error.",
+                    ::startWakeWordLoop
+                )
             }
         }
     }
+}
+    
 
     private fun speakText(
         text: String,

@@ -626,4 +626,217 @@ class WakeWordService : Service() {
                     speakText(
                         "Your battery is at $percent percent.",
                         ::startWakeWordLoop
+                        
+                )
+                } else {
+                    speakText(
+                        "I couldn't read the battery level.",
+                        ::startWakeWordLoop
+                    )
+                }
+            }
+
+            lower.startsWith("open ") -> {
+                val appName = text.substringAfter("open ").trim()
+
+                if (openApp(appName)) {
+                    speakText(
+                        "Opening $appName.",
+                        ::startWakeWordLoop
+                    )
+                } else {
+                    speakText(
+                        "I couldn't find $appName on your phone.",
+                        ::startWakeWordLoop
+                    )
+                }
+            }
+
+            else -> askSonicAI(text)
+        }
+    }
+
+    private fun openApp(name: String): Boolean {
+        val lower = name.lowercase(Locale.ROOT)
+
+        val packages = mapOf(
+            "youtube" to "com.google.android.youtube",
+            "whatsapp" to "com.whatsapp",
+            "chrome" to "com.android.chrome",
+            "settings" to "com.android.settings",
+            "instagram" to "com.instagram.android",
+            "maps" to "com.google.android.apps.maps",
+            "google maps" to "com.google.android.apps.maps",
+            "gmail" to "com.google.android.gm",
+            "spotify" to "com.spotify.music",
+            "phone" to "com.google.android.dialer",
+            "camera" to "com.android.camera2"
+        )
+
+        val packageName = packages[lower] ?: return false
+
+        return try {
+            val launchIntent =
+                packageManager.getLaunchIntentForPackage(packageName)
+
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(launchIntent)
+                true
+            } else {
+                false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun askSonicAI(command: String) {
+        updateNotification("Thinking...")
+
+        thread(name = "SonicAIRequest") {
+            var answer: String? = null
+
+            try {
+                val connection =
+                    (URL(AI_URL).openConnection() as HttpURLConnection)
+
+                try {
+                    connection.requestMethod = "POST"
+                    connection.connectTimeout = 15000
+                    connection.readTimeout = 30000
+                    connection.doOutput = true
+                    connection.setRequestProperty(
+                        "Content-Type",
+                        "application/json; charset=UTF-8"
+                    )
+
+                    val body = JSONObject()
+                        .put("message", command)
+                        .toString()
+
+                    connection.outputStream.use { output ->
+                        output.write(body.toByteArray(Charsets.UTF_8))
+                    }
+
+                    val statusCode = connection.responseCode
+
+                    val stream = if (statusCode in 200..299) {
+                        connection.inputStream
+                    } else {
+                        connection.errorStream
+                    }
+
+                    val responseBody = stream?.bufferedReader()?.use {
+                        it.readText()
+                    }.orEmpty()
+
+                    if (statusCode in 200..299) {
+                        val json = JSONObject(responseBody)
+
+                        answer = json.optString("response")
+                            .takeIf { it.isNotBlank() }
+                            ?: json.optString("answer")
+                                .takeIf { it.isNotBlank() }
+                            ?: json.optString("text")
+                                .takeIf { it.isNotBlank() }
+                            ?: json.optString("output")
+                                .takeIf { it.isNotBlank() }
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (_: Exception) {
+                answer = null
+            }
+
+            mainHandler.post {
+                if (!serviceActive) return@post
+
+                val reply = answer
+
+                if (!reply.isNullOrBlank()) {
+                    updateNotification("Sonic replied")
+                    speakText(reply, ::startWakeWordLoop)
+                } else {
+                    speakText(
+                        "Sorry, I couldn't get a response. Please try again.",
+                        ::startWakeWordLoop
+                    )
+                }
+            }
+        }
+    }
+
+    private fun speakText(
+        text: String,
+        after: (() -> Unit)? = null
+    ) {
+        if (!serviceActive) return
+
+        afterSpeech = after
+
+        if (!ttsReady || tts == null) {
+            pendingSpeech = text
+            return
+        }
+
+        speakNow(text)
+    }
+
+    private fun speakNow(text: String) {
+        if (!ttsReady || tts == null) {
+            pendingSpeech = text
+            return
+        }
+
+        val result = tts?.speak(
+            text,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "sonic-${System.currentTimeMillis()}"
+        )
+
+        if (result == TextToSpeech.ERROR) {
+            val next = afterSpeech
+            afterSpeech = null
+            next?.invoke()
+        }
+    }
+
+    override fun onDestroy() {
+        stopRequested = true
+        serviceActive = false
+        detectorActive = false
+
+        try {
+            recorder?.stop()
+        } catch (_: Exception) {
+        }
+
+        try {
+            recorder?.release()
+        } catch (_: Exception) {
+        }
+
+        recorder = null
+
+        worker?.interrupt()
+        worker = null
+
+        destroyRecognizer()
+
+        try {
+            tts?.stop()
+            tts?.shutdown()
+        } catch (_: Exception) {
+        }
+
+        tts = null
+        ttsReady = false
+
+        super.onDestroy()
+    }
+}
+
                   

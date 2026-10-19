@@ -745,7 +745,7 @@ private fun askSonicAI(command: String) {
             if (statusCode in 200..299) {
                 val json = JSONObject(responseBody)
 
-                answer = json.optJSONObject("choices")
+                answer = json.optJSONArray("choices")
                     ?.optJSONObject(0)
                     ?.optJSONObject("message")
                     ?.optString("content")

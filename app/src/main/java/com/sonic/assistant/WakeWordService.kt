@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -21,8 +22,6 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
-import android.provider.Settings
-import android.net.Uri
 
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.KeywordSpotter
@@ -31,15 +30,14 @@ import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 
-import org.json.JSONArray
 import org.json.JSONObject
 
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.Locale
 import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.concurrent.thread
-import kotlin.math.sqrt
 
 class WakeWordService : Service() {
 
@@ -50,7 +48,6 @@ class WakeWordService : Service() {
         private const val CHANNEL_ID = "sonic_background"
         private const val NOTIFICATION_ID = 101
 
-        // Existing Sonic Cloudflare Worker.
         private const val AI_URL =
             "https://sonic-ai-bridge.kulkarnit511.workers.dev"
     }
@@ -80,14 +77,14 @@ class WakeWordService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-
         createNotificationChannel()
 
         tts = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
                 val engine = tts
                 engine?.language = Locale("en", "IN")
-                ttsReady = true
+                engine?.setSpeechRate(0.92f)
+                engine?.setPitch(1.0f)
 
                 engine?.setOnUtteranceProgressListener(
                     object : UtteranceProgressListener() {
@@ -110,6 +107,8 @@ class WakeWordService : Service() {
                         }
                     }
                 )
+
+                ttsReady = true
 
                 pendingSpeech?.let { text ->
                     pendingSpeech = null
@@ -141,7 +140,7 @@ class WakeWordService : Service() {
 
         try {
             val notification = buildNotification(
-                "Starting Sonic background listening..."
+                "Starting background listening..."
             )
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -172,7 +171,7 @@ class WakeWordService : Service() {
             )
 
             channel.description =
-                "Indicates when Sonic is monitoring for its wake word"
+                "Shows when Sonic is listening for its wake word"
 
             getSystemService(NotificationManager::class.java)
                 .createNotificationChannel(channel)
@@ -215,11 +214,7 @@ class WakeWordService : Service() {
     }
 
     private fun updateNotification(message: String) {
-        val manager = getSystemService(
-            NotificationManager::class.java
-        )
-
-        manager.notify(
+        getSystemService(NotificationManager::class.java).notify(
             NOTIFICATION_ID,
             buildNotification(message)
         )
@@ -410,7 +405,6 @@ class WakeWordService : Service() {
 
                     if (wakeDetected) break
                 }
-
             } catch (e: Exception) {
                 if (serviceActive && !stopRequested) {
                     failure = e.message ?: e.javaClass.simpleName
@@ -476,20 +470,19 @@ class WakeWordService : Service() {
         }
 
         try {
-            recognizer?.destroy()
-
+            destroyRecognizer()
             recognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
             recognizer?.setRecognitionListener(
                 object : RecognitionListener {
-                    override fun onReadyForSpeech(params: android.os.Bundle?) {
+                    override fun onReadyForSpeech(
+                        params: android.os.Bundle?
+                    ) {
                         updateNotification("Listening for your command")
                     }
 
                     override fun onBeginningOfSpeech() {}
-
                     override fun onRmsChanged(rmsdB: Float) {}
-
                     override fun onBufferReceived(buffer: ByteArray?) {}
 
                     override fun onEndOfSpeech() {
@@ -507,7 +500,9 @@ class WakeWordService : Service() {
                         }
                     }
 
-                    override fun onResults(results: android.os.Bundle?) {
+                    override fun onResults(
+                        results: android.os.Bundle?
+                    ) {
                         val command = results
                             ?.getStringArrayList(
                                 SpeechRecognizer.RESULTS_RECOGNITION
@@ -557,8 +552,7 @@ class WakeWordService : Service() {
             }
 
             recognizer?.startListening(speechIntent)
-
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             destroyRecognizer()
             speakText(
                 "I couldn't start speech recognition.",
@@ -592,6 +586,11 @@ class WakeWordService : Service() {
         when {
             lower in listOf("stop listening", "stop sonic") -> {
                 speakText("Okay. Sonic is stopping.") {
+                    getSharedPreferences("sonic", MODE_PRIVATE)
+                        .edit()
+                        .putBoolean("enabled", false)
+                        .apply()
+
                     stopSelf()
                 }
             }
@@ -601,7 +600,7 @@ class WakeWordService : Service() {
                 val time = SimpleDateFormat(
                     "h:mm a",
                     Locale.getDefault()
-                ).format(java.util.Date())
+                ).format(Date())
 
                 speakText("It is $time.", ::startWakeWordLoop)
             }
@@ -613,12 +612,12 @@ class WakeWordService : Service() {
                 )
 
                 val level = battery?.getIntExtra(
-                    android.os.BatteryManager.EXTRA_LEVEL,
+                    BatteryManager.EXTRA_LEVEL,
                     -1
                 ) ?: -1
 
                 val scale = battery?.getIntExtra(
-                    android.os.BatteryManager.EXTRA_SCALE,
+                    BatteryManager.EXTRA_SCALE,
                     -1
                 ) ?: -1
 
@@ -627,8 +626,4 @@ class WakeWordService : Service() {
                     speakText(
                         "Your battery is at $percent percent.",
                         ::startWakeWordLoop
-                    )
-                } else {
-                    speakText(
-                        "I couldn't read the battery level.",
-                        ::startWakeWord
+                  

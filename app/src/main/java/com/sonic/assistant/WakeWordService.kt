@@ -261,7 +261,7 @@ class WakeWordService : Service() {
                     modelConfig = modelConfig,
                     keywordsFile = "keywords.txt",
                     keywordsScore = 1.5f,
-                    keywordsThreshold = 0.25f,
+                    keywordsThreshold = 0.15f,
                     numTrailingBlanks = 2
                 )
 

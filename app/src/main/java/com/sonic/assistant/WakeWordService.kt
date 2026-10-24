@@ -82,6 +82,7 @@ class WakeWordService : Service() {
         tts = TextToSpeech(this) { result ->
             if (result == TextToSpeech.SUCCESS) {
                 val engine = tts
+
                 engine?.language = Locale("en", "IN")
                 engine?.setSpeechRate(0.92f)
                 engine?.setPitch(1.0f)
@@ -265,10 +266,11 @@ class WakeWordService : Service() {
                     numTrailingBlanks = 2
                 )
 
-                localSpotter = KeywordSpotter(
+                val spotter = KeywordSpotter(
                     assetManager = assets,
                     config = kwsConfig
                 )
+                localSpotter = spotter
 
                 if (!serviceActive) return@thread
 
@@ -334,21 +336,22 @@ class WakeWordService : Service() {
                     }
                 }
 
-                if (localRecorder == null) {
-                    throw IllegalStateException(
+                val activeRecorder = localRecorder
+                    ?: throw IllegalStateException(
                         "Could not initialize microphone"
                     )
-                }
 
-                recorder = localRecorder
-                localStream = localSpotter.createStream()
+                recorder = activeRecorder
+
+                val stream = spotter.createStream()
+                localStream = stream
 
                 if (!serviceActive) return@thread
 
-                localRecorder.startRecording()
+                activeRecorder.startRecording()
 
                 if (
-                    localRecorder.recordingState !=
+                    activeRecorder.recordingState !=
                     AudioRecord.RECORDSTATE_RECORDING
                 ) {
                     throw IllegalStateException(
@@ -362,11 +365,14 @@ class WakeWordService : Service() {
                     maxOf(bufferSize / 2, 2048)
                 )
 
+                // Microphone diagnostic timer.
+                var lastAudioDiagnosticAt = 0L
+
                 while (
                     serviceActive &&
                     !Thread.currentThread().isInterrupted
                 ) {
-                    val count = localRecorder.read(
+                    val count = activeRecorder.read(
                         audioBuffer,
                         0,
                         audioBuffer.size,
@@ -385,19 +391,58 @@ class WakeWordService : Service() {
                         audioBuffer[index] / 32768.0f
                     }
 
-                    localStream.acceptWaveform(samples, sampleRate)
+                    // Measure the microphone signal.
+                    var peak = 0f
+                    var sumSquares = 0.0
+
+                    for (sample in samples) {
+                        val magnitude = kotlin.math.abs(sample)
+
+                        if (magnitude > peak) {
+                            peak = magnitude
+                        }
+
+                        sumSquares +=
+                            sample.toDouble() * sample.toDouble()
+                    }
+
+                    val rms = kotlin.math.sqrt(
+                        sumSquares / samples.size.coerceAtLeast(1)
+                    )
+
+                    val now = System.currentTimeMillis()
+
+                    if (now - lastAudioDiagnosticAt >= 2000L) {
+                        lastAudioDiagnosticAt = now
+
+                        val diagnostic = String.format(
+                            Locale.US,
+                            "Mic test: peak %.3f | RMS %.4f",
+                            peak,
+                            rms
+                        )
+
+                        mainHandler.post {
+                            if (serviceActive && detectorActive) {
+                                updateNotification(diagnostic)
+                            }
+                        }
+                    }
+
+                    // Send the captured audio to Sherpa-ONNX.
+                    stream.acceptWaveform(samples, sampleRate)
 
                     while (
                         serviceActive &&
-                        localSpotter.isReady(localStream)
+                        spotter.isReady(stream)
                     ) {
-                        localSpotter.decode(localStream)
+                        spotter.decode(stream)
 
                         val keyword =
-                            localSpotter.getResult(localStream).keyword
+                            spotter.getResult(stream).keyword
 
                         if (keyword.isNotBlank()) {
-                            localSpotter.reset(localStream)
+                            spotter.reset(stream)
                             wakeDetected = true
                             break
                         }
@@ -435,7 +480,10 @@ class WakeWordService : Service() {
                 } catch (_: Exception) {
                 }
 
-                recorder = null
+                if (recorder === localRecorder) {
+                    recorder = null
+                }
+
                 detectorActive = false
                 worker = null
 
@@ -450,6 +498,7 @@ class WakeWordService : Service() {
                     }
                 } else if (serviceActive && failure != null) {
                     val message = failure!!
+
                     mainHandler.post {
                         updateNotification("Wake-word error: $message")
                     }
@@ -554,6 +603,7 @@ class WakeWordService : Service() {
             recognizer?.startListening(speechIntent)
         } catch (_: Exception) {
             destroyRecognizer()
+
             speakText(
                 "I couldn't start speech recognition.",
                 ::startWakeWordLoop
@@ -578,219 +628,106 @@ class WakeWordService : Service() {
     private fun handleCommand(command: String) {
         if (!serviceActive) return
 
-        updateNotification("Command: $command")
+        updateNotification("Thinking...")
 
-        val text = command.trim()
-        val lower = text.lowercase(Locale.ROOT)
+        thread(
+            start = true,
+            name = "SonicAIRequest"
+        ) {
+            var connection: HttpURLConnection? = null
 
-        when {
-            lower in listOf("stop listening", "stop sonic") -> {
-                speakText("Okay. Sonic is stopping.") {
-                    getSharedPreferences("sonic", MODE_PRIVATE)
-                        .edit()
-                        .putBoolean("enabled", false)
-                        .apply()
-
-                    stopSelf()
-                }
-            }
-
-            lower.contains("what time") ||
-                lower == "tell me the time" -> {
-                val time = SimpleDateFormat(
-                    "h:mm a",
-                    Locale.getDefault()
-                ).format(Date())
-
-                speakText("It is $time.", ::startWakeWordLoop)
-            }
-
-            lower.contains("battery") -> {
-                val battery = registerReceiver(
-                    null,
-                    IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-                )
-
-                val level = battery?.getIntExtra(
-                    BatteryManager.EXTRA_LEVEL,
-                    -1
-                ) ?: -1
-
-                val scale = battery?.getIntExtra(
-                    BatteryManager.EXTRA_SCALE,
-                    -1
-                ) ?: -1
-
-                if (level >= 0 && scale > 0) {
-                    val percent = level * 100 / scale
-                    speakText(
-                        "Your battery is at $percent percent.",
-                        ::startWakeWordLoop
-                        
-                )
-                } else {
-                    speakText(
-                        "I couldn't read the battery level.",
-                        ::startWakeWordLoop
+            try {
+                connection = (URL(AI_URL).openConnection()
+                    as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 15000
+                    readTimeout = 30000
+                    doOutput = true
+                    setRequestProperty(
+                        "Content-Type",
+                        "application/json; charset=UTF-8"
+                    )
+                    setRequestProperty(
+                        "Accept",
+                        "application/json"
                     )
                 }
-            }
 
-            lower.startsWith("open ") -> {
-                val appName = text.substringAfter("open ").trim()
-
-                if (openApp(appName)) {
-                    speakText(
-                        "Opening $appName.",
-                        ::startWakeWordLoop
-                    )
-                } else {
-                    speakText(
-                        "I couldn't find $appName on your phone.",
-                        ::startWakeWordLoop
+                val payload = JSONObject().apply {
+                    put(
+                        "messages",
+                        org.json.JSONArray().put(
+                            JSONObject().apply {
+                                put("role", "user")
+                                put("content", command)
+                            }
+                        )
                     )
                 }
-            }
 
-            else -> askSonicAI(text)
-        }
-    }
+                connection.outputStream.use { output ->
+                    output.write(
+                        payload.toString().toByteArray(Charsets.UTF_8)
+                    )
+                }
 
-    private fun openApp(name: String): Boolean {
-        val lower = name.lowercase(Locale.ROOT)
+                val status = connection.responseCode
 
-        val packages = mapOf(
-            "youtube" to "com.google.android.youtube",
-            "whatsapp" to "com.whatsapp",
-            "chrome" to "com.android.chrome",
-            "settings" to "com.android.settings",
-            "instagram" to "com.instagram.android",
-            "maps" to "com.google.android.apps.maps",
-            "google maps" to "com.google.android.apps.maps",
-            "gmail" to "com.google.android.gm",
-            "spotify" to "com.spotify.music",
-            "phone" to "com.google.android.dialer",
-            "camera" to "com.android.camera2"
-        )
-
-        val packageName = packages[lower] ?: return false
-
-        return try {
-            val launchIntent =
-                packageManager.getLaunchIntentForPackage(packageName)
-
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                startActivity(launchIntent)
-                true
-            } else {
-                false
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    
-private fun askSonicAI(command: String) {
-    updateNotification("Connecting to Sonic AI...")
-
-    thread(name = "SonicAIRequest") {
-        var answer: String? = null
-        var errorMessage: String? = null
-
-        var connection: HttpURLConnection? = null
-
-        try {
-            connection =
-                URL(AI_URL).openConnection() as HttpURLConnection
-
-            connection.requestMethod = "POST"
-            connection.connectTimeout = 20000
-            connection.readTimeout = 45000
-            connection.doOutput = true
-            connection.setRequestProperty(
-                "Content-Type",
-                "application/json; charset=UTF-8"
-            )
-
-            val messages = org.json.JSONArray().put(
-                JSONObject()
-                    .put("role", "user")
-                    .put("content", command)
-            )
-
-            val body = JSONObject()
-                .put("messages", messages)
-                .toString()
-
-            connection.outputStream.use { output ->
-                output.write(body.toByteArray(Charsets.UTF_8))
-            }
-
-            val statusCode = connection.responseCode
-
-            val responseStream =
-                if (statusCode in 200..299) {
+                val responseStream = if (status in 200..299) {
                     connection.inputStream
                 } else {
                     connection.errorStream
                 }
 
-            val responseBody =
-                responseStream?.bufferedReader()?.use {
-                    it.readText()
-                }.orEmpty()
+                val responseBody = responseStream
+                    ?.bufferedReader(Charsets.UTF_8)
+                    ?.use { it.readText() }
+                    .orEmpty()
 
-            if (statusCode in 200..299) {
+                if (status !in 200..299) {
+                    throw IllegalStateException(
+                        "AI server returned HTTP $status"
+                    )
+                }
+
                 val json = JSONObject(responseBody)
 
-                answer = json.optJSONArray("choices")
+                val answer = json
+                    .optJSONArray("choices")
                     ?.optJSONObject(0)
                     ?.optJSONObject("message")
                     ?.optString("content")
-                    ?.takeIf { it.isNotBlank() }
+                    ?.trim()
+                    .orEmpty()
 
-                if (answer.isNullOrBlank()) {
-                    errorMessage =
-                        "Cloudflare returned no answer. Response: " +
-                        responseBody.take(300)
+                if (answer.isBlank()) {
+                    throw IllegalStateException(
+                        "The AI returned an empty response"
+                    )
                 }
-            } else {
-                errorMessage =
-                    "Cloudflare HTTP $statusCode: " +
-                    responseBody.take(400)
-            }
-        } catch (e: Exception) {
-            errorMessage =
-                "${e.javaClass.simpleName}: " +
-                (e.message ?: "Unknown connection error")
-        } finally {
-            connection?.disconnect()
-        }
 
-        mainHandler.post {
-            if (!serviceActive) return@post
+                mainHandler.post {
+                    if (serviceActive) {
+                        speakText(answer, ::startWakeWordLoop)
+                    }
+                }
+            } catch (e: Exception) {
+                val error = e.message ?: "Unknown network error"
 
-            if (!answer.isNullOrBlank()) {
-                updateNotification("Sonic AI replied")
-                speakText(answer!!, ::startWakeWordLoop)
-            } else {
-                val message = errorMessage
-                    ?: "Unknown AI connection error"
-
-                updateNotification("Sonic AI error: $message")
-
-                speakText(
-                    "I couldn't get an AI answer. " +
-                    "Check the Sonic notification for the error.",
-                    ::startWakeWordLoop
-                )
+                mainHandler.post {
+                    if (serviceActive) {
+                        updateNotification("AI error: $error")
+                        speakText(
+                            "Sorry, I couldn't get an answer right now.",
+                            ::startWakeWordLoop
+                        )
+                    }
+                }
+            } finally {
+                connection?.disconnect()
             }
         }
     }
-}
-    
 
     private fun speakText(
         text: String,
@@ -861,6 +798,4 @@ private fun askSonicAI(command: String) {
 
         super.onDestroy()
     }
-}
-
-                  
+}(

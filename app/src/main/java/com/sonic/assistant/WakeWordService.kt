@@ -1,4 +1,3 @@
-
 package com.sonic.assistant
 
 import android.app.Notification
@@ -7,12 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -34,8 +31,6 @@ import org.json.JSONObject
 
 import java.net.HttpURLConnection
 import java.net.URL
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import kotlin.concurrent.thread
 
@@ -236,6 +231,10 @@ class WakeWordService : Service() {
             var wakeDetected = false
             var failure: String? = null
 
+            // Measurements saved for the wake-detection response.
+            var wakePeak = 0f
+            var wakeRms = 0.0
+
             try {
                 val modelConfig = OnlineModelConfig(
                     transducer = OnlineTransducerModelConfig(
@@ -365,7 +364,6 @@ class WakeWordService : Service() {
                     maxOf(bufferSize / 2, 2048)
                 )
 
-                // Microphone diagnostic timer.
                 var lastAudioDiagnosticAt = 0L
 
                 while (
@@ -391,7 +389,7 @@ class WakeWordService : Service() {
                         audioBuffer[index] / 32768.0f
                     }
 
-                    // Measure the microphone signal.
+                    // Measure this audio buffer.
                     var peak = 0f
                     var sumSquares = 0.0
 
@@ -429,7 +427,7 @@ class WakeWordService : Service() {
                         }
                     }
 
-                    // Send the captured audio to Sherpa-ONNX.
+                    // Feed this buffer to the wake-word detector.
                     stream.acceptWaveform(samples, sampleRate)
 
                     while (
@@ -442,6 +440,11 @@ class WakeWordService : Service() {
                             spotter.getResult(stream).keyword
 
                         if (keyword.isNotBlank()) {
+                            // Save measurements from the buffer being
+                            // processed when the detector fires.
+                            wakePeak = peak
+                            wakeRms = rms
+
                             spotter.reset(stream)
                             wakeDetected = true
                             break
@@ -490,10 +493,28 @@ class WakeWordService : Service() {
                 if (serviceActive && wakeDetected) {
                     mainHandler.post {
                         if (serviceActive) {
-                            updateNotification(
-                                "Wake word detected; waiting for command"
+                            val diagnosticMessage = String.format(
+                                Locale.US,
+                                "Peak: %.3f. RMS: %.4f.",
+                                wakePeak,
+                                wakeRms
                             )
-                            speakText("Yes?", ::beginCommandListening)
+
+                            updateNotification(
+                                "Wake detected | Peak: %.3f | RMS: %.4f"
+                                    .format(
+                                        Locale.US,
+                                        wakePeak,
+                                        wakeRms
+                                    )
+                            )
+
+                            // Speak the measurements instead of "Yes?".
+                            // Begin command listening after speaking them.
+                            speakText(
+                                diagnosticMessage,
+                                ::beginCommandListening
+                            )
                         }
                     }
                 } else if (serviceActive && failure != null) {

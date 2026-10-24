@@ -798,4 +798,4 @@ class WakeWordService : Service() {
 
         super.onDestroy()
     }
-}(
+}

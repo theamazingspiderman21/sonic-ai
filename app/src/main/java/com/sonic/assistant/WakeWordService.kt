@@ -362,7 +362,7 @@ class WakeWordService : Service() {
 
                 // Process microphone audio in 100 ms chunks.
 val audioBuffer = ShortArray(sampleRate / 10)
-                )
+                
 
                 var lastAudioDiagnosticAt = 0L
 

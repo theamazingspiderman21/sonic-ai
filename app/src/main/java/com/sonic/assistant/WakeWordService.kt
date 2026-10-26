@@ -360,8 +360,8 @@ class WakeWordService : Service() {
 
                 updateNotification("Listening for Hey Sonic")
 
-                val audioBuffer = ShortArray(
-                    maxOf(bufferSize / 2, 2048)
+                // Process microphone audio in 100 ms chunks.
+val audioBuffer = ShortArray(sampleRate / 10)
                 )
 
                 var lastAudioDiagnosticAt = 0L

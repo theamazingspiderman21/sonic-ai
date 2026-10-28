@@ -292,19 +292,16 @@ class WakeWordService : Service() {
 
                 val sources = mutableListOf<Pair<Int, String>>()
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    sources.add(
-                        Pair(
-                            MediaRecorder.AudioSource.UNPROCESSED,
-                            "UNPROCESSED"
-                        )
-                    )
-                }
+sources.add(
+    Pair(
+        MediaRecorder.AudioSource.VOICE_RECOGNITION,
+        "VOICE_RECOGNITION"
+    )
+)
 
-                sources.add(
-                    Pair(MediaRecorder.AudioSource.MIC, "MIC")
-                )
-
+sources.add(
+    Pair(MediaRecorder.AudioSource.MIC, "MIC")
+)
                 for ((source, _) in sources) {
                     if (!serviceActive) return@thread
 

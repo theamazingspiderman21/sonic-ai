@@ -262,7 +262,7 @@ class WakeWordService : Service() {
                     keywordsFile = "keywords.txt",
                     keywordsScore = 1.5f,
                     keywordsThreshold = 0.10f,
-                    numTrailingBlanks = 2
+                    numTrailingBlanks = 1
                 )
 
                 val spotter = KeywordSpotter(
@@ -490,32 +490,13 @@ val audioBuffer = ShortArray(sampleRate / 10)
                 worker = null
 
                 if (serviceActive && wakeDetected) {
-                    mainHandler.post {
-                        if (serviceActive) {
-                            val diagnosticMessage = String.format(
-                                Locale.US,
-                                "Peak: %.3f. RMS: %.4f.",
-                                wakePeak,
-                                wakeRms
-                            )
-
-                            updateNotification(
-                                "Wake detected | Peak: %.3f | RMS: %.4f"
-                                    .format(
-                                        Locale.US,
-                                        wakePeak,
-                                        wakeRms
-                                    )
-                            )
-
-                            // Speak the measurements instead of "Yes?".
-                            // Begin command listening after speaking them.
-                            speakText(
-                                diagnosticMessage,
-                                ::beginCommandListening
-                            )
-                        }
-                    }
+    mainHandler.post {
+        if (serviceActive) {
+            updateNotification("Wake word detected")
+            speakText("Yes?", ::beginCommandListening)
+        }
+    }
+} else if (serviceActive && failure != null) {
                 } else if (serviceActive && failure != null) {
                     val message = failure!!
 

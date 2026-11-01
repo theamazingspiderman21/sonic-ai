@@ -45,7 +45,8 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
-       - name: Download Hey Jarvis wake-word models
+
+      - name: Download Hey Jarvis wake-word models
         run: |
           mkdir -p app/src/main/assets
           curl -fL --retry 3 "https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.tflite" -o app/src/main/assets/hey_jarvis_v0.1.tflite

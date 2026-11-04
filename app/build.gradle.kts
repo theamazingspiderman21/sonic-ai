@@ -32,7 +32,7 @@ android {
 }
 
 dependencies {
-    implementation("org.tensorflow:tensorflow-lite:2.17.0")
+        implementation("org.tensorflow:tensorflow-lite:2.17.0")
     implementation("androidx.activity:activity-compose:1.9.3")
 
     implementation(
